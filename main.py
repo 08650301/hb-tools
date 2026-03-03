@@ -994,6 +994,17 @@ def price_calculation_main():
         entry_result.delete("1.0", tk.END)
         result_text.delete("1.0", tk.END)
 
+        if not entry_max_response_limit.get().strip():
+            entry_result.insert(tk.END, "最高响应限价未填写，无法计算。\n")
+            result_text.insert(tk.END, "最高响应限价未填写，无法计算。\n")
+            return
+        try:
+            max_response_limit = Decimal(entry_max_response_limit.get().strip())
+        except Exception:
+            entry_result.insert(tk.END, "最高响应限价输入格式有误，无法计算。\n")
+            result_text.insert(tk.END, "最高响应限价输入格式有误，无法计算。\n")
+            return
+
         input_items = [
             (entry_a.get(), "价格满分"),
             (entry_q.get(), "得分比率Q"),
@@ -1052,6 +1063,9 @@ def price_calculation_main():
         entry_result.insert(tk.END, f"所有价格的平均价：{average_price:.8}\n\n")
         result_text.insert(tk.END, f"所有价格的平均价: {average_price:.8}\n\n")
 
+        sorted_prices = sorted(prices)
+        second_lowest_price = sorted_prices[1] if len(sorted_prices) >= 2 else None
+
         exceptional_prices = []
         for price in prices:
             if price > average_price * (1 + positive_b) or price < average_price * (1 - negative_c):
@@ -1060,12 +1074,31 @@ def price_calculation_main():
         result_text.insert(tk.END, "异常报价判定:\n")
         for price in prices:
             deviation = (price - average_price) / average_price
+            possible_low_cost = (
+                price < average_price * Decimal("0.5")
+                or (second_lowest_price is not None and price < second_lowest_price * Decimal("0.5"))
+                or price < max_response_limit * Decimal("0.45")
+            )
+            suffix = ""
             if price in exceptional_prices:
-                entry_result.insert(tk.END, f"报价{price:>12} |偏离{deviation:>8.2%}→异常\n")
-                result_text.insert(tk.END, f"报价{price:>12} |偏离{deviation:>8.2%}→异常\n")
-            else:
-                entry_result.insert(tk.END, f"报价{price:>12} |偏离{deviation:>8.2%}\n")
-                result_text.insert(tk.END, f"报价{price:>12} |偏离{deviation:>8.2%}\n")
+                suffix = "→异常"
+            if possible_low_cost:
+                suffix = f"{suffix}→可能低于成本" if suffix else "→可能低于成本"
+            reasons = []
+            avg_threshold = average_price * Decimal("0.5")
+            if price < avg_threshold:
+                reasons.append(f"报价 < 全部报价平均值×0.5（阈值：{avg_threshold:.8}）")
+            if second_lowest_price is not None:
+                second_low_threshold = second_lowest_price * Decimal("0.5")
+                if price < second_low_threshold:
+                    reasons.append(f"报价 < 次低价×0.5（次低价：{second_lowest_price}，阈值：{second_low_threshold:.8}）")
+            limit_threshold = max_response_limit * Decimal("0.45")
+            if price < limit_threshold:
+                reasons.append(f"报价 < 最高限价×0.45（最高限价：{max_response_limit}，阈值：{limit_threshold:.8}）")
+            tooltip_text = "触发“可能低于成本”的原因：\n" + "\n".join(reasons) if reasons else ""
+
+            line = f"报价{price:>12} |偏离{deviation:>8.2%}{suffix}\n"
+            insert_result_line(line, tooltip_text)
         entry_result.insert(tk.END, "\n")
         result_text.insert(tk.END, "\n")
 
@@ -1162,9 +1195,19 @@ def price_calculation_main():
             plt.legend()
             plt.show()
 
+    def validate_number(new_value):
+        value = new_value.strip()
+        if value == "":
+            return True
+        try:
+            Decimal(value)
+            return True
+        except Exception:
+            return False
+
     window = tk.Tk()
     window.title("HB价格测算")
-    window.geometry("940x320")
+    window.geometry("1080x320")
 
     parameters_frame = tk.Frame(window)
     parameters_frame.grid(row=0, column=0, padx=10, sticky="n")
@@ -1208,16 +1251,151 @@ def price_calculation_main():
     price_frame = tk.Frame(window)
     price_frame.grid(row=0, column=1, padx=10, sticky="n")
 
+    label_max_response_limit = tk.Label(price_frame, text="最高响应限价")
+    label_max_response_limit.grid(row=0, column=0, sticky="w")
+    entry_max_response_limit = tk.Entry(
+        price_frame,
+        width=20,
+        validate="key",
+        validatecommand=(price_frame.register(validate_number), "%P"),
+    )
+    entry_max_response_limit.grid(row=1, column=0, sticky="w")
+
     label_price = tk.Label(price_frame, text="逐行输入价格")
-    label_price.grid(row=0, column=0, sticky="w")
-    entry_price = tk.Text(price_frame, height=21, width=20)
-    entry_price.grid(row=1, column=0, sticky="w")
+    label_price.grid(row=2, column=0, sticky="w")
+    entry_price = tk.Text(price_frame, height=18, width=20)
+    entry_price.grid(row=3, column=0, sticky="w")
+
+    over_limit_tag = "over_limit"
+    entry_price.tag_configure(over_limit_tag, foreground="red")
+
+    tooltip_window = tk.Toplevel(window)
+    tooltip_window.withdraw()
+    tooltip_window.overrideredirect(True)
+    tooltip_window.attributes("-topmost", True)
+    tooltip_label = tk.Label(
+        tooltip_window,
+        text="",
+        background="#ffffe0",
+        relief="solid",
+        borderwidth=1,
+        padx=6,
+        pady=3,
+        justify="left",
+        anchor="w",
+    )
+    tooltip_label.pack()
+
+    def hide_tooltip():
+        try:
+            tooltip_window.withdraw()
+        except Exception:
+            pass
+
+    def show_tooltip_with_text(event, text):
+        try:
+            tooltip_label.configure(text=text)
+        except Exception:
+            return
+        tooltip_window.geometry(f"+{event.x_root + 12}+{event.y_root + 12}")
+        tooltip_window.deiconify()
+
+    def show_over_limit_tooltip(event):
+        show_tooltip_with_text(event, "价格超过最高限价")
+
+    def parse_price_from_line(raw_line):
+        match = re.search(r"(\d+(\.\d+)?)(%?)", raw_line)
+        if not match:
+            return None
+        value = Decimal(match.group(1))
+        if match.group(3) == "%":
+            value /= 100
+        return value, match.start(0), match.end(0)
+
+    def update_over_limit_highlight():
+        hide_tooltip()
+        if str(entry_price.cget("state")) == "disabled":
+            return
+        entry_price.tag_remove(over_limit_tag, "1.0", "end")
+
+        raw_limit = entry_max_response_limit.get().strip()
+        if raw_limit == "":
+            return
+        try:
+            limit = Decimal(raw_limit)
+        except Exception:
+            return
+
+        last_line = int(entry_price.index("end-1c").split(".")[0])
+        for line_no in range(1, last_line + 1):
+            line_text = entry_price.get(f"{line_no}.0", f"{line_no}.end")
+            if not line_text.strip():
+                continue
+            parsed = parse_price_from_line(line_text)
+            if not parsed:
+                continue
+            price, start_col, end_col = parsed
+            if price > limit:
+                entry_price.tag_add(
+                    over_limit_tag,
+                    f"{line_no}.{start_col}",
+                    f"{line_no}.{end_col}",
+                )
+
+    def on_price_modified(event):
+        if entry_price.edit_modified():
+            entry_price.edit_modified(False)
+            update_over_limit_highlight()
+
+    entry_price.tag_bind(over_limit_tag, "<Enter>", show_over_limit_tooltip)
+    entry_price.tag_bind(over_limit_tag, "<Leave>", lambda _e: hide_tooltip())
+    entry_price.bind("<<Modified>>", on_price_modified)
+    entry_price.edit_modified(False)
+
+    price_entry_enabled_background = entry_price.cget("background")
+    price_entry_enabled_foreground = entry_price.cget("foreground")
+    price_entry_enabled_insertbackground = entry_price.cget("insertbackground")
+
+    def update_price_entry_state():
+        raw_limit = entry_max_response_limit.get().strip()
+        if raw_limit == "":
+            hide_tooltip()
+            try:
+                entry_price.configure(state=tk.NORMAL)
+                entry_price.tag_remove(over_limit_tag, "1.0", "end")
+                entry_price.configure(
+                    state=tk.DISABLED,
+                    background="#f0f0f0",
+                    foreground="#808080",
+                    insertbackground="#808080",
+                )
+            except Exception:
+                pass
+            return
+
+        try:
+            Decimal(raw_limit)
+        except Exception:
+            return
+
+        if str(entry_price.cget("state")) == "disabled":
+            entry_price.configure(
+                state=tk.NORMAL,
+                background=price_entry_enabled_background,
+                foreground=price_entry_enabled_foreground,
+                insertbackground=price_entry_enabled_insertbackground,
+            )
+        update_over_limit_highlight()
+
+    entry_max_response_limit.bind("<KeyRelease>", lambda _e: update_price_entry_state())
+    entry_max_response_limit.bind("<FocusOut>", lambda _e: update_price_entry_state())
+    update_price_entry_state()
 
     result_frame = tk.Frame(window)
     result_frame.grid(row=0, column=2, padx=10, sticky="n")
     label_result = tk.Label(result_frame, text="经修正的基准价结果输出")
     label_result.grid(row=0, column=0, sticky="w")
-    entry_result = tk.Text(result_frame, height=21, width=40)
+    entry_result = tk.Text(result_frame, height=21, width=50)
     entry_result.grid(row=1, column=0, sticky="w")
     entry_result.insert(tk.END, "【经修正的基准价法】\n\n1.价格得分=价格满分*得分比率Q*(1-(投标报价-基准价)/ 基准价*λ)；\n\n2.投标报价高于或低于基准价时λ分别取值；\n\n3.异常报价：所有投标人报价的算术平均值正偏离X以上，负偏离Y以下的投标报价为异常报价；\n\n4.基准价：所有非异常投标报价的算术平均值；\n\n5.若投标人价格均为异常，则取所有投标价格的算术平均价作为基准价；\n\n6.所有投标人价格得分（包含异常价格）均采用此公式计算，最高加至满分，最低扣至0分。")
 
@@ -1225,14 +1403,39 @@ def price_calculation_main():
     result_frame_interpolation.grid(row=0, column=3, padx=10, sticky="n")
     label_result_interpolation = tk.Label(result_frame_interpolation, text="经修正的直线内插法结果输出")
     label_result_interpolation.grid(row=0, column=0, sticky="w")
-    result_text = tk.Text(result_frame_interpolation, height=21, width=40)
+    result_text = tk.Text(result_frame_interpolation, height=21, width=50)
     result_text.grid(row=1, column=0, sticky="w")
     result_text.insert(tk.END, "【经修正的直线内插法】\n\n1.价格得分=（（有效最高报价+有效最低报价）-投标报价)/有效最高报价*价格满分；\n\n2.异常报价：所有投标人报价的算术平均值正偏离X以上、负偏离Y以下的投标报价为异常报价；\n\n3.有效最高报价和有效最低报价为剔除异常报价后的所有报价中的最高、最低报价；\n\n4.若剔除异常报价后剩余报价少于2个，则不再作异常报价认定，直接以所有投标人报价中的最高报价和最低报价代入计算公式计算；\n\n5.异常报价投标人得分同样按以上计算公式计算；\n\n6.所有投标人价格得分（包含异常价格）均采用此公式计算，最高得满分，最低得0分。")
 
-    result_frame_plot = tk.Frame(window)
-    result_frame_plot.grid(row=0, column=4, padx=10, sticky="n")
-    label_result_plot = tk.Label(result_frame_plot, text="散点图")
-    label_result_plot.grid(row=0, column=0, sticky="w")
+    low_cost_label_text = "→可能低于成本"
+    low_cost_tag_counter = 0
+
+    def add_low_cost_tag(text_widget, insert_start_index, line_text, tooltip_text):
+        nonlocal low_cost_tag_counter
+        if not tooltip_text:
+            return
+        pos = line_text.find(low_cost_label_text)
+        if pos == -1:
+            return
+
+        tag_name = f"low_cost_{low_cost_tag_counter}"
+        low_cost_tag_counter += 1
+
+        tag_start = f"{insert_start_index}+{pos}c"
+        tag_end = f"{tag_start}+{len(low_cost_label_text)}c"
+        text_widget.tag_add(tag_name, tag_start, tag_end)
+        text_widget.tag_configure(tag_name, foreground="red")
+        text_widget.tag_bind(tag_name, "<Enter>", lambda e, msg=tooltip_text: show_tooltip_with_text(e, msg))
+        text_widget.tag_bind(tag_name, "<Leave>", lambda _e: hide_tooltip())
+
+    def insert_result_line(line_text, tooltip_text):
+        entry_start = entry_result.index("end-1c")
+        entry_result.insert(tk.END, line_text)
+        add_low_cost_tag(entry_result, entry_start, line_text, tooltip_text)
+
+        result_start = result_text.index("end-1c")
+        result_text.insert(tk.END, line_text)
+        add_low_cost_tag(result_text, result_start, line_text, tooltip_text)
 
     button_plot = tk.Button(parameters_frame, text="绘制散点图", command=draw_scatter_plot)
     button_plot.grid(row=12, column=0, pady=10, sticky="e")
